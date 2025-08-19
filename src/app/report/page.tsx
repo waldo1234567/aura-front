@@ -9,7 +9,6 @@ import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { useSpring, animated } from "@react-spring/web";
 import { motion } from 'framer-motion';
 import { Smile, Heart, Volume2, Lightbulb, TrendingUp, Sparkles, Target, ChevronDown } from 'lucide-react'; // Added Sparkles icon
 import LoadingScreen from '@/components/Loader';
@@ -25,48 +24,131 @@ function simpleMarkdownToHtml(s: string): string {
     return html;
 }
 
-function parseObservations(text: string): string[] {
-    if (!text) return [];
+type ParsedObservation = { heading?: string; bullets: string[] };
+type ParsedReply = {
+    observations: ParsedObservation[];
+    actionable: string[];
+    flagged: string[];
+};
 
-    const trimmed = text.trim();
-
-    // 1) If we have an explicit numbered-list format "1. something 2. something" capture using regex
-    const numberedRe = /(\d+)\.\s+([\s\S]*?)(?=(?:\n\d+\.|$))/g;
-    const numberedMatches: string[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = numberedRe.exec(trimmed)) !== null) {
-        const item = m[2].trim();
-        if (item) numberedMatches.push(item);
-    }
-    if (numberedMatches.length > 0) return numberedMatches;
-
-    // 2) Common alternative: "1\nObservation 1\n<text>\n2\nObservation 2\n<text>"
-    // We'll match groups that start with a line that is just a number, optionally followed by a "Observation N" line, then consume until the next number line
-    const altRe = /(?:^|\n)(\d+)\s*(?:\r?\n)?(?:Observation\s*\d+\s*(?:\r?\n)?)?([\s\S]*?)(?=(?:\n\d+\s*(?:\r?\n)?(?:Observation\s*\d+\s*(?:\r?\n)?)|$))/gi;
-    const altMatches: string[] = [];
-    while ((m = altRe.exec(trimmed)) !== null) {
-        const item = m[2].trim();
-        if (item) altMatches.push(item);
-    }
-    if (altMatches.length > 0) return altMatches;
-
-    // 3) Another common variant: "Observation 1\n<text>\nObservation 2\n<text>"
-    const obsHeadRe = /(?:^|\n)Observation\s*\d+\s*(?:\r?\n)?([\s\S]*?)(?=(?:\nObservation\s*\d+|$))/gi;
-    const obsHeadMatches: string[] = [];
-    while ((m = obsHeadRe.exec(trimmed)) !== null) {
-        const item = m[1].trim();
-        if (item) obsHeadMatches.push(item);
-    }
-    if (obsHeadMatches.length > 0) return obsHeadMatches;
-
-    // 4) Fallback: split by double newlines (paragraphs)
-    return trimmed
-        .split(/\n{2,}/)
-        .map(s => s.trim())
-        .filter(Boolean);
+function normalizeLineEndings(s: string) {
+    return s ? s.replace(/\r\n?/g, '\n') : '';
 }
 
+/** canonicalize common headers */
+function canonicalHeading(rawHeader: string): string {
+    const h = rawHeader.trim();
+    const withoutPrefix = h.replace(/^OBSERVATIONS\s*[—\-–:]\s*/i, '').trim();
+    if (/transcript/i.test(withoutPrefix)) return 'Transcript';
+    if (/time[-\s]*domain|hrv\s*\(time/i.test(withoutPrefix)) return 'HRV (time-domain)';
+    if (/frequency[-\s]*domain|hrv\s*\(frequency|lf\/hf/i.test(withoutPrefix)) return 'HRV (frequency-domain)';
+    if (/facial/i.test(withoutPrefix)) return 'Facial expressions';
+    if (/voice/i.test(withoutPrefix)) return 'Voice';
+    return withoutPrefix || h;
+}
 
+function splitIntoBullets(rawContent: string): string[] {
+    if (!rawContent) return [];
+    const content = normalizeLineEndings(rawContent).trim();
+
+    // bullet char class (covers many common unicode bullets and hyphen/asterisk)
+    const bulletChars = '[•\u2022\u2023\u25E6\u2043\\-\\*\\u2024\\u2027\\u2026]';
+    const bulletSep = new RegExp(`(?:\\n[\\s\\u00A0]*${bulletChars}\\s*|^[\\s\\u00A0]*${bulletChars}\\s*)`, 'm');
+
+    // 1) explicit bullets
+    if (bulletSep.test(content)) {
+        const rawParts = content.split(bulletSep);
+        const parts = rawParts
+            .map(s => s.replace(new RegExp(`^[\\s\\u00A0]*${bulletChars}\\s*`), '').trim())
+            .filter(Boolean)
+            .map(s => s.replace(/\s*\n\s*/g, ' '));
+        if (parts.length) return parts;
+    }
+
+    // 2) numbered lists
+    if (/\n\s*\d+\.\s+/.test(content) || /^\s*\d+\.\s+/.test(content)) {
+        const parts = content
+            .split(/\n\s*\d+\.\s*/)
+            .map(s => s.trim())
+            .filter(Boolean)
+            .map(s => s.replace(/\s*\n\s*/g, ' '));
+        if (parts.length) return parts;
+    }
+
+    // 3) paragraph gaps
+    const paras = content.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+    if (paras.length > 1) return paras.map(s => s.replace(/\s*\n\s*/g, ' '));
+
+    // fallback: single normalized block
+    return [content.replace(/\s*\n\s*/g, ' ').trim()];
+}
+
+function parseReply(reply: string): ParsedReply {
+    if (!reply) return { observations: [], actionable: [], flagged: [] };
+
+    const text = normalizeLineEndings(reply);
+    // remove trailing STRUCTURED_SECTION_END chunk so it doesn't get included
+    const cleanedText = text.replace(/STRUCTURED_SECTION_END[\s\S]*$/i, '').trim();
+
+    // find header matches and their positions
+    const headerRe = /^\s*(\d+)\)\s*([^\n\r]+)/gm;
+    const matches: { index: number; matchText: string; headerLine: string }[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = headerRe.exec(cleanedText)) !== null) {
+        matches.push({ index: m.index, matchText: m[0], headerLine: (m[2] || '').trim() });
+    }
+
+    // fallback: no headers found -> treat whole thing as Transcript
+    if (!matches.length) {
+        const bullets = splitIntoBullets(cleanedText);
+        return { observations: [{ heading: 'Transcript', bullets }], actionable: [], flagged: [] };
+    }
+
+    // slice sections deterministically using matchText.length
+    const sections: { headerLine: string; content: string }[] = [];
+    for (let i = 0; i < matches.length; i++) {
+        const cur = matches[i];
+        const next = matches[i + 1];
+        const contentStart = cur.index + cur.matchText.length; // deterministic slice start AFTER the matched header text
+        const contentEnd = next ? next.index : cleanedText.length;
+        let content = cleanedText.slice(contentStart, contentEnd).trim();
+
+        // **Important cleanup**: if the content still begins with a header-like line (sometimes formatting
+        // results in header repeating), strip leading header-like lines such as "2) OBSERVATIONS — ..." or "OBSERVATIONS — ...:"
+        // Remove only one or two obvious header lines to be safe
+        content = content.replace(/^\s*(?:\d+\)\s*)?OBSERVATIONS\s*[—\-–:]\s*[^\n\r]*\n?/i, '').trim();
+        content = content.replace(/^\s*\d+\)\s*[^\n\r]*\n?/, '').trim();
+
+        sections.push({ headerLine: cur.headerLine, content });
+    }
+
+    const observations: ParsedObservation[] = [];
+    let actionable: string[] = [];
+    let flagged: string[] = [];
+
+    for (const sec of sections) {
+        const headerRaw = sec.headerLine;
+        const contentRaw = sec.content;
+        const upper = headerRaw.toUpperCase();
+        const heading = canonicalHeading(headerRaw);
+
+        if (/ACTIONABLE|ACTIONABLE_HIGHLIGHTS|💡/i.test(upper)) {
+            actionable = actionable.concat(splitIntoBullets(contentRaw));
+        } else if (/FLAGGED_EXCERPTS?|FLAGGED_EXCERPT/i.test(upper)) {
+            flagged = flagged.concat(splitIntoBullets(contentRaw));
+        } else {
+            const bullets = splitIntoBullets(contentRaw);
+            if (bullets.length) observations.push({ heading, bullets });
+        }
+    }
+
+    // normalize and dedupe
+    const uniq = (arr: string[]) => Array.from(new Set((arr || []).map(s => s.trim()))).filter(Boolean);
+    actionable = uniq(actionable);
+    flagged = uniq(flagged);
+
+    return { observations, actionable, flagged };
+}
 // Animation variants
 const containerVariants = {
     hidden: { opacity: 0 },
@@ -84,36 +166,39 @@ const itemVariants = {
     visible: { y: 0, opacity: 1 },
 };
 
-const renderObservations = (text: string): React.ReactNode => {
-    // cut off Actionable Tip section if present
-    const observationsEndIndex = text.indexOf('**Actionable Tip:**');
-    const observationsText = observationsEndIndex !== -1 ? text.substring(0, observationsEndIndex).trim() : text;
-
-    const parts = parseObservations(observationsText);
-
-    return parts.map((part: string, index: number) => {
-        const html = simpleMarkdownToHtml(part);
-        return (
-            <motion.div
-                key={index}
-                variants={itemVariants}
-                whileHover={{ scale: 1.02 }}
-                transition={{ type: "spring", stiffness: 200 }}
-                className="mb-4"
-            >
-                <Card className="border border-border hover:shadow-md transition-all duration-200 bg-card/60 backdrop-blur">
-                    <CardHeader className="flex items-center gap-3">
+const renderObservations = (parts: { heading?: string; bullets: string[] }[]): React.ReactNode => {
+    return parts.map((part, index) => (
+        <motion.div
+            key={index}
+            variants={itemVariants}
+            whileHover={{ scale: 1.02 }}
+            transition={{ type: "spring", stiffness: 200 }}
+            className="mb-4"
+        >
+            <Card className="border border-border hover:shadow-md transition-all duration-200 bg-card/60 backdrop-blur">
+                <CardHeader className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
                         <span className="text-primary font-bold text-xl">{index + 1}</span>
-                        <CardTitle className="text-lg font-semibold">Observation {index + 1}</CardTitle>
-                    </CardHeader>
-                    <CardContent className="text-sm text-foreground/80 leading-relaxed">
-                        <div dangerouslySetInnerHTML={{ __html: html }} />
-                    </CardContent>
-                </Card>
-            </motion.div>
-        );
-    });
+                        {part.heading && <span className="text-sm text-muted-foreground uppercase ml-3">{part.heading}</span>}
+                    </div>
+                    <CardTitle className="text-lg font-semibold">{part.heading ?? `Observation ${index + 1}`}</CardTitle>
+                </CardHeader>
+                <CardContent className="text-sm text-foreground/80 leading-relaxed">
+                    {part.bullets.length > 1 ? (
+                        <ul className="list-disc pl-6 space-y-2">
+                            {part.bullets.map((b, i) => (
+                                <li key={i} dangerouslySetInnerHTML={{ __html: simpleMarkdownToHtml(b) }} />
+                            ))}
+                        </ul>
+                    ) : (
+                        <div dangerouslySetInnerHTML={{ __html: simpleMarkdownToHtml(part.bullets[0] || '') }} />
+                    )}
+                </CardContent>
+            </Card>
+        </motion.div>
+    ));
 };
+
 const getEmotionBgClass = (emotion: string) => {
     switch (emotion) {
         case 'neutral': return 'bg-muted-foreground';
@@ -163,9 +248,13 @@ export default function ReportPage() {
         if (!contextReportData) {
             const stored = localStorage.getItem("aura_report_data");
             if (stored) {
-                const parsed = JSON.parse(stored);
-                setLocalReportData(parsed);
-                setReportData(parsed);
+                try {
+                    const parsed = JSON.parse(stored);
+                    // parsed is expected to already be normalized (we stored normalized earlier)
+                    setLocalReportData(parsed);
+                    setReportData(parsed);
+                    console.log(reportData, "=> data recieved on report page") // save into context (no double-normalize)
+                } catch (e) { /* ignore parse errors */ }
             }
         }
     }, [contextReportData, setReportData]);
@@ -187,31 +276,12 @@ export default function ReportPage() {
 
     const data = reportData || localReportData;
     const { faceMetrics, voiceMetrics, hrvMetrics, reply = '' } = data || {};
-
-    let observations = reply;
-    let recommendation = '';
-    let rationale = '';
-
-    const TIP_MARKER = '**Actionable Tip:**';
-    const RATIONALE_MARKER = '**Rationale:**';
-
-    const tipIndex = reply.indexOf(TIP_MARKER);
-    if (tipIndex !== -1) {
-        // everything before tip marker is observations
-        observations = reply.slice(0, tipIndex).trim();
-
-        // everything after tip marker (trim leading/trailing whitespace)
-        const afterTip = reply.slice(tipIndex + TIP_MARKER.length).trim();
-
-        const rationaleIndexInAfterTip = afterTip.indexOf(RATIONALE_MARKER);
-        if (rationaleIndexInAfterTip !== -1) {
-            recommendation = afterTip.slice(0, rationaleIndexInAfterTip).trim();
-            rationale = afterTip.slice(rationaleIndexInAfterTip + RATIONALE_MARKER.length).trim();
-        } else {
-            recommendation = afterTip;
-            rationale = '';
-        }
-    }
+    console.log(data, "=> report data on report page");
+    const parsed = parseReply(reply || "");
+    console.log(parsed, "=> parse reply")
+    const observations = parsed.observations; // {heading?, text}[]
+    const recommendation = parsed.actionable; // string[]
+    const flaggedExcerpts = parsed.flagged;
 
     const keyTakeaway = "Your session indicates a primarily neutral emotional state, but with signs of underlying physiological stress. The key is to incorporate mindful relaxation to complement your existing routines.";
 
@@ -248,37 +318,47 @@ export default function ReportPage() {
                                 <Lightbulb className="mr-2" /> Insights from your session
                             </h2>
                             <div className="bg-muted/30 p-6 rounded-2xl border mt-4">
-                                {renderObservations(observations)}
+                                {observations.length ? renderObservations(observations) : (
+                                    <p className="text-sm text-muted-foreground">No observation text could be parsed from the model reply.</p>
+                                )}
                             </div>
                         </div>
 
-                        <Collapsible>
-                            <CollapsibleTrigger asChild>
-                                <motion.button
-                                    whileHover={{ scale: 1.02 }}
-                                    className="w-full flex items-center justify-between bg-emerald-100 p-4 rounded-xl border border-emerald-200 text-emerald-800 font-semibold"
-                                >
-                                    💡 Actionable Tip
-                                    <ChevronDown className="h-4 w-4" />
-                                </motion.button>
-                            </CollapsibleTrigger>
-                            <CollapsibleContent className="mt-4 p-4 bg-white rounded-lg border border-border shadow-sm">
-                                <div
-                                    className="mb-3 text-sm leading-relaxed"
-                                    // If using DOMPurify, do: dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(simpleMarkdownToHtml(recommendation)) }}
-                                    dangerouslySetInnerHTML={{ __html: simpleMarkdownToHtml(recommendation) }}
-                                />
-                                {rationale && (
-                                    <details>
-                                        <summary className="cursor-pointer font-medium">Why this works</summary>
-                                        <div
-                                            className="mt-2 text-sm text-foreground/80"
-                                            dangerouslySetInnerHTML={{ __html: simpleMarkdownToHtml(rationale) }}
-                                        />
-                                    </details>
-                                )}
-                            </CollapsibleContent>
-                        </Collapsible>
+                        {flaggedExcerpts.length > 0 && (
+                            <div className="mt-8">
+                                <h2 className="text-xl font-semibold text-primary border-b border-border pb-1 flex items-center">
+                                    <Sparkles className="mr-2" /> Flagged Excerpts
+                                </h2>
+                                <div className="bg-orange-50 p-6 rounded-2xl border mt-4">
+                                    <ul className="list-disc pl-6 space-y-2">
+                                        {flaggedExcerpts.map((ex, i) => (
+                                            <li key={i} className="text-base text-orange-900 font-semibold">{ex}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            </div>
+                        )}
+
+                        {recommendation.length > 0 && (
+                            <Collapsible>
+                                <CollapsibleTrigger asChild>
+                                    <motion.button
+                                        whileHover={{ scale: 1.02 }}
+                                        className="w-full flex items-center justify-between bg-emerald-100 p-4 rounded-xl border border-emerald-200 text-emerald-800 font-semibold"
+                                    >
+                                        💡 Actionable Highlights
+                                        <ChevronDown className="h-4 w-4" />
+                                    </motion.button>
+                                </CollapsibleTrigger>
+                                <CollapsibleContent className="mt-4 p-4 bg-white rounded-lg border border-border shadow-sm">
+                                    <ul className="list-disc pl-6 space-y-2">
+                                        {recommendation.map((tip, i) => (
+                                            <li key={i} dangerouslySetInnerHTML={{ __html: simpleMarkdownToHtml(tip) }} />
+                                        ))}
+                                    </ul>
+                                </CollapsibleContent>
+                            </Collapsible>
+                        )}
                     </motion.div>
 
                     {/* Right Column */}

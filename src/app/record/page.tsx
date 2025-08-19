@@ -3,7 +3,6 @@ import React, { useRef, useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useReport } from '@/context/ReportContext';
 import LoadingScreen from '@/components/Loader';
-
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
@@ -12,7 +11,9 @@ import { AnimatePresence, motion } from 'framer-motion';
 import * as faceapi from 'face-api.js';
 import * as Meyda from 'meyda';
 import { computeEAR, detectPitch } from '@/app/utils/utils';
-import { s } from 'framer-motion/client';
+import TranscriptDiff from '@/components/TranscriptDiff';
+import { VoiceCleaner } from '@/lib/cleaner';
+import { VoiceAggregate } from '@/lib/cleaner';
 
 export interface ExpressionSample {
     time: number;
@@ -35,7 +36,9 @@ export interface VoiceSample {
     mfcc: number[];
     spectralCentroid: number;
     zcr: number;
+    valid: boolean; // true if valid sample
 }
+
 
 export interface BlinkRateSample {
     time: number;
@@ -55,6 +58,11 @@ export interface Report {
     expression: { count: number; percent: string };
     heartRate: { count: number; percent: string };
     voice: { count: number; percent: string };
+}
+
+interface PolishedTranscriptShape {
+    finalTranscript: string;
+    edits?: string[];
 }
 
 // --- Animation Variants (can be defined in a separate file if you prefer) ---
@@ -79,6 +87,18 @@ const popIn = {
 };
 
 export default function RecordPage() {
+    // Modal state for prompt questions
+    const [showPromptModal, setShowPromptModal] = useState(false);
+    const [currentPromptIdx, setCurrentPromptIdx] = useState(0);
+    const psychiatristPrompts = [
+        "How have you been feeling emotionally this past week?",
+        "Have you noticed any changes in your sleep or appetite?",
+        "Is there anything that's been worrying you lately?",
+        "Can you tell me about any recent events that have affected your mood?",
+        "Are you finding it difficult to enjoy things you used to?",
+        "Do you feel supported by friends or family right now?",
+        "Have you experienced any thoughts of self-harm or hopelessness?"
+    ];
     const [bluetoothError, setBluetoothError] = useState<string | null>(null);
     const [wantHeartRate, setWantHeartRate] = useState<boolean | null>(null); // null = not chosen yet
     const [showHRPrompt, setShowHRPrompt] = useState<boolean>(() => true);
@@ -89,13 +109,17 @@ export default function RecordPage() {
     const [hrReady, setHrReady] = useState<boolean>(false);
     const [audioReady, setAudioReady] = useState<boolean>(false);
     const [calibrationTime, setCalibrationTime] = useState<number>(0);
-    const [sessionStatus, setSessionStatus] = useState<'idle' | 'calibrating' | 'recording'>('idle');
+    const [sessionStatus, setSessionStatus] = useState<
+        'idle' | 'calibrating' | 'recording' | 'polishing' | 'showingDiff' | 'sendingReport'
+    >('idle');
     const [isProcessing, setIsProcessing] = useState<boolean>(false);
     const [transcript, setTranscript] = useState<string>('');
+    const [polishedTranscript, setPolishedTranscript] = useState<string>('');
+
 
     const expressionsBuffer = useRef<ExpressionSample[]>([]);
     const heartRateBuffer = useRef<HRSample[]>([]);
-    const voiceBuffer = useRef<VoiceSample[]>([]);
+    const voiceBuffer = useRef<VoiceAggregate[]>([]);
     const blinkRateRef = useRef<number[]>([]);
     const blinkRateBuffer = useRef<BlinkRateSample[]>([]);
 
@@ -139,9 +163,72 @@ export default function RecordPage() {
             });
     }, []);
 
+    async function fetchPolishedTranscript(raw: string) {
+        console.log('Sending raw transcript length:', raw?.length);
+
+        const res = await fetch('http://localhost:5555/api/v1/asr/polish', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ raw })
+        });
+        const text = await res.text();
+        console.log('Polish raw text:', text);
+        let body;
+        try {
+            body = JSON.parse(text);
+        } catch {
+            // maybe server sent non-JSON text; attempt res.json() as fallback
+            try { body = await res.json(); } catch (e) { body = text; }
+        }
+
+        // final defensive normalization
+        if (typeof body === 'string' && body.trim().startsWith('{')) {
+            try { body = JSON.parse(body); } catch (e) { /* leave as string */ }
+        }
+
+        // ensure shape
+        if (!body || !body.finalTranscript) {
+            console.warn('Polished transcript missing finalTranscript, falling back to raw');
+            return { finalTranscript: raw, edits: [] };
+        }
+        return body;
+
+    }
+
+    async function sendReport(chosenTranscript: string | PolishedTranscriptShape, usePolished: boolean, timeline: any[]) {
+        setSessionStatus('sendingReport');
+        try {
+            const transcriptString =
+                typeof chosenTranscript === "string"
+                    ? chosenTranscript
+                    : chosenTranscript.finalTranscript;
+            const response = await fetch('http://localhost:5555/api/v1/vlogs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    transcript: transcriptString,
+                    timeline: timeline,
+                    usePolished: usePolished
+                })
+            });
+            if (!response.ok) throw new Error('Failed to generate report from API.');
+            const reportData = await response.json();
+            setReportData(reportData);
+            try { window.localStorage.setItem('aura_report_data', JSON.stringify(reportData)); } catch (e) { /* ignore */ }
+            router.push('/report');
+        } catch (err) {
+            console.error('Report generation failed:', err);
+            alert('An error occurred while generating the report. Please try again.');
+            setIsProcessing(false);
+        }
+    }
 
 
-    const markPrompt = () => promptTimestamps.current.push(Date.now());
+    const markPrompt = () => {
+        promptTimestamps.current.push(Date.now());
+        setShowPromptModal(true);
+        setCurrentPromptIdx((idx) => (idx + 1) % psychiatristPrompts.length);
+    };
     const isInReadingWindow = (time: number) =>
         promptTimestamps.current.some(t0 => time - t0 < 3000 && time >= t0);
 
@@ -166,7 +253,7 @@ export default function RecordPage() {
         const audioCtx = audioCtxRef.current;
 
         const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 8192;
+        analyser.fftSize = 2048;
         const source = audioCtx.createMediaStreamSource(stream);
         source.connect(analyser);
 
@@ -184,10 +271,12 @@ export default function RecordPage() {
             ? value.getUint16(1, true)
             : value.getUint8(1);
         const time = Date.now();
+        console.log('[HR] Handler fired:', { bpm, time, sessionRunning: sessionRunningRef.current, endingSession: endingSessionRef.current });
         if (time - baselineStartRef.current >= 0 && !isInReadingWindow(time)) {
             const last = lastBpmRef.current;
             if (last == null || Math.abs(bpm - last) < 30) {
                 heartRateBuffer.current.push({ time, bpm });
+                console.log('[HR] Buffer push:', { time, bpm, bufferLen: heartRateBuffer.current.length });
             }
             lastBpmRef.current = bpm;
             setHrReady(true);
@@ -208,6 +297,8 @@ export default function RecordPage() {
         const char = await service.getCharacteristic('heart_rate_measurement');
         hrCharRef.current = char;
         char.addEventListener('characteristicvaluechanged', hrHandler);
+        console.log('Heart rate monitor connected:', device.name);
+        setHrReady(true);
         await char.startNotifications();
     };
 
@@ -246,6 +337,8 @@ export default function RecordPage() {
         let lastHr: HRSample | null = null;
         let lastBlink: number | null = null;
 
+        console.log('[HR] alignStreams: buffer length', heartRateBuffer.current.length, heartRateBuffer.current);
+
         for (let t = start; t <= end; t += intervalMs) {
             const exprs = expressionsBuffer.current.filter((p: any) => Math.abs(p.time - t) < intervalMs / 2);
             const hrs = heartRateBuffer.current.filter((p: any) => Math.abs(p.time - t) < intervalMs / 2);
@@ -260,6 +353,10 @@ export default function RecordPage() {
             if (expression) lastExpr = expression;
 
             const hr = hrs.length ? (lastHr = hrs[hrs.length - 1]) : lastHr;
+
+            if (hrs.length) {
+                console.log('[HR] alignStreams: found HR for t', t, hrs[hrs.length - 1]);
+            }
 
             const blinkValue = blinks.length ? blinks[blinks.length - 1] : null;
             const blinkRate: number | null = blinkValue == null
@@ -281,13 +378,23 @@ export default function RecordPage() {
                     ? avgPitchArr.reduce((s, p) => s + p, 0) / avgPitchArr.length
                     : null;
                 const lastVoice = voices[voices.length - 1];
+
+                const normalizedVol = avgVol;
+
+                const isValid =
+                    (normalizedVol > 0.02) &&
+                    (avgPitch != null && avgPitch > 50) &&
+                    Array.isArray(lastVoice?.mfcc) &&
+                    lastVoice.mfcc.length > 0;
+
                 voice = {
                     time: t,
-                    volume: avgVol,
+                    volume: normalizedVol,
                     pitch: avgPitch,
                     mfcc: lastVoice?.mfcc ?? null,
                     spectralCentroid: lastVoice?.spectralCentroid ?? null,
                     zcr: lastVoice?.zcr ?? null,
+                    valid: isValid
                 };
             }
 
@@ -455,7 +562,7 @@ export default function RecordPage() {
         // ensure analyser exists (should be created in initCameraAudio, but double-check)
         if (!analyserRef.current) {
             const analyser = audioCtx.createAnalyser();
-            analyser.fftSize = 8192;
+            analyser.fftSize = 2048;
             analyserRef.current = analyser;
             // connect stream source if video stream exists
             if (videoRef.current?.srcObject) {
@@ -463,6 +570,7 @@ export default function RecordPage() {
                 srcNode.connect(analyserRef.current);
             }
         }
+        const cleaner = new VoiceCleaner();
         const bufferSize = analyserRef.current?.fftSize ?? 8192;
 
         const meydaAnalyzer = (Meyda as any).createMeydaAnalyzer({
@@ -475,22 +583,33 @@ export default function RecordPage() {
                 const timeDomainBuffer = new Float32Array(analyserRef.current!.fftSize);
                 analyserRef.current!.getFloatTimeDomainData(timeDomainBuffer);
 
+                const sr = audioCtxRef.current?.sampleRate ?? null;
+                const bufSize = analyserRef.current?.fftSize ?? null;
                 // Run pitch detection
                 let rawPitch = detectPitch(timeDomainBuffer, audioCtxRef.current!.sampleRate);
                 console.log("Raw pitch detection:", rawPitch);
-                if (!rawPitch || rawPitch <= 50 || rawPitch >= 1000) {
-                    rawPitch = NaN; // or 0, or leave undefined
+                if (!Number.isFinite(rawPitch as any)) {
+                    rawPitch = null;
                 }
 
-                // Detect pitch from normalized float PCM
-                voiceBuffer.current.push({
-                    time,
-                    volume: features.rms,
-                    pitch: rawPitch !== null ? rawPitch : null,
-                    mfcc: features.mfcc,
-                    spectralCentroid: features.spectralCentroid,
-                    zcr: features.zcr,
-                });
+                const aggregates = cleaner.addRawFrame(
+                    {
+                        time,
+                        rms: features.rms,
+                        pitch: rawPitch,
+                        mfcc: features.mfcc,
+                        spectralCentroid: features.spectralCentroid,
+                        zcr: features.zcr,
+                        sampleRate: audioCtxRef.current!.sampleRate,
+                        bufferSize: analyserRef.current!.fftSize
+                    }
+                )
+                if (aggregates && aggregates.length) {
+                    for (const agg of aggregates) {
+                        console.log("Voice aggregate:", agg);
+                        voiceBuffer.current.push(agg);
+                    }
+                }
             }
         });
         voiceIntervalRef.current = meydaAnalyzer; // new ref
@@ -552,38 +671,28 @@ export default function RecordPage() {
         const timeline = alignStreams(500);
         console.log('Session ended. Timeline:', timeline);
         console.log('Transcript:', transcriptRef.current);
-        setIsProcessing(true);
-        try {
-            const response = await fetch('http://localhost:5555/api/v1/vlogs', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    transcript: transcriptRef.current,
-                    timeline: timeline
-                })
-            });
-            console.log('Report data sent to API:', { transcript: transcriptRef.current, timeline });
-            if (!response.ok) {
-                throw new Error('Failed to generate report from API.');
-            }
+        setSessionStatus('polishing');
+        fetchPolishedTranscript(transcriptRef.current)
+            .then(pt => {
+                console.log('Fetched polished transcript (pt):', pt, 'type:', typeof pt);
+                setPolishedTranscript(pt);
+                setSessionStatus('showingDiff');
+                // The modal's onChoose will call sendReport(...)
+            })
+            .catch(err => {
+                console.error('Polish call failed, proceeding with raw', err);
+                setPolishedTranscript("");
+                setSessionStatus('showingDiff');
+            })
 
-            const reportData = await response.json();
-            setReportData(reportData);
-            try {
-                window.localStorage.setItem('aura_report_data', JSON.stringify(reportData));
-            } catch (e) {
-                console.error("Failed to save report data to localStorage", e);
-            }
-            router.push('/report');
-        } catch (error) {
-            console.error('Report generation failed:', error);
-            alert('An error occurred while generating the report. Please try again.');
-            setIsProcessing(false);
-        }
     };
 
-    if (isProcessing) {
-        return <LoadingScreen />;
+    if (sessionStatus === 'sendingReport' || sessionStatus === 'polishing') {
+        // Show a loading screen for both polishing and sending the report
+        const message = sessionStatus === 'polishing'
+            ? "Polishing transcript..."
+            : "Generating your report...";
+        return <LoadingScreen />; // You can pass a message prop if your component supports it
     }
 
     // --- UI Logic based on state ---
@@ -592,8 +701,46 @@ export default function RecordPage() {
     const showSession = calibrated && sessionStatus === 'idle';
     const showRecording = sessionStatus === 'recording';
 
+
+
     return (
         <div className="flex min-h-screen flex-col items-center justify-center bg-background p-4 overflow-hidden relative">
+            {/* Prompt Modal */}
+            {showPromptModal && (
+                <motion.div
+                    initial={{ y: -200, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    exit={{ y: -200, opacity: 0 }}
+                    transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                    className="fixed top-0 left-0 w-full flex justify-center z-50"
+                >
+                    <div className="bg-white rounded-b-2xl shadow-xl border border-border p-8 mt-0 max-w-md w-full flex flex-col items-center gap-6">
+                        <h2 className="text-xl font-bold text-primary text-center">Session Prompt</h2>
+                        <p className="text-lg text-foreground/90 text-center">{psychiatristPrompts[currentPromptIdx]}</p>
+                        <Button className="mt-4 w-full" onClick={() => setShowPromptModal(false)}>Close</Button>
+                    </div>
+                </motion.div>
+            )}
+            {sessionStatus === 'showingDiff' && (
+                <TranscriptDiff
+                    rawTranscript={transcriptRef.current}
+                    polishedTranscript={polishedTranscript}// This will be false here, but good practice
+                    onChoose={(usePolished) => {
+                        // This logic is now safer
+                        const polishedText = (typeof polishedTranscript === 'object' && polishedTranscript)
+                            ? polishedTranscript
+                            : (typeof polishedTranscript === 'string' ? polishedTranscript : '');
+
+                        const chosen = usePolished ? polishedText : transcriptRef.current;
+                        console.log('Chosen transcript:', chosen, 'Use polished:', usePolished);
+                        sendReport(chosen, usePolished, alignStreams(500));
+                    }}
+                    onClose={() => {
+                        // Decide what happens on "Cancel". Maybe go back to an idle state.
+                        setSessionStatus('idle');
+                    }}
+                />
+            )}
             {/* Heart Rate Monitor Choice Modal */}
             {showHRPrompt && wantHeartRate === null && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">

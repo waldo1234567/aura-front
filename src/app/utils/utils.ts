@@ -21,7 +21,7 @@ export const detectPitch = (buffer: Float32Array, sampleRate: number): number | 
     if (maxV - minV < 1e-4) return null; // effectively constant / DC
 
     // Voice frequency bounds (Hz). Adjust if you need wider range.
-    const MIN_F = 50;   // lowest expected pitch
+    const MIN_F = 60;   // lowest expected pitch
     const MAX_F = 500;  // highest expected pitch
 
     // Convert to offset search range (samples)
@@ -44,7 +44,7 @@ export const detectPitch = (buffer: Float32Array, sampleRate: number): number | 
         }
     }
 
-    const CORR_THRESHOLD = 0.55; // permissive; raise to 0.7 if too many false positives
+    const CORR_THRESHOLD = 0.65; // permissive; raise to 0.7 if too many false positives
     if (bestOffset <= 0 || bestCorrelation < CORR_THRESHOLD) {
         return null;
     }
