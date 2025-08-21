@@ -326,39 +326,60 @@ export default function RecordPage() {
         return candidates.length ? Math.min(...candidates) : null;
     };
 
-    const alignStreams = (intervalMs = 500, slackMs = 500): TimelineEntry[] => {
+    const alignStreams = (intervalMs = 500, slackMs = 500, debug = true): TimelineEntry[] => {
         const earliest = getEarliestSampleTime();
         const fallbackBaseline = baselineStartRef.current ?? Date.now();
         const start = earliest != null ? Math.max(0, earliest - slackMs) : fallbackBaseline;
-
         const end = Date.now();
+
         const timeline: TimelineEntry[] = [];
         let lastExpr: ExpressionSample | null = null;
         let lastHr: HRSample | null = null;
         let lastBlink: number | null = null;
 
-        console.log('[HR] alignStreams: buffer length', heartRateBuffer.current.length, heartRateBuffer.current);
+        if (debug) console.log('[HR] alignStreams: heartRateBuffer length', heartRateBuffer.current.length);
 
+        // helper: pick the item in arr with smallest |item.time - t|
+        const pickClosestByTime = (arr: any[], t: number) => {
+            if (!arr || arr.length === 0) return null;
+            let best = arr[0];
+            let bestDiff = Math.abs(best.time - t);
+            for (let i = 1; i < arr.length; i++) {
+                const cur = arr[i];
+                const d = Math.abs(cur.time - t);
+                if (d < bestDiff) { best = cur; bestDiff = d; }
+            }
+            return best;
+        };
+
+        // iterate timeline slots
         for (let t = start; t <= end; t += intervalMs) {
+            // expressions (keep last in window)
             const exprs = expressionsBuffer.current.filter((p: any) => Math.abs(p.time - t) < intervalMs / 2);
-            const hrs = heartRateBuffer.current.filter((p: any) => Math.abs(p.time - t) < intervalMs / 2);
-            const blinks = blinkRateBuffer.current.filter((b: any) => {
-                // support either number timestamps or objects with .time
-                const bt = typeof b === 'number' ? b : (b && b.time) ? b.time : null;
-                return bt != null && Math.abs(bt - t) < intervalMs / 2;
-            });
-            const voices = voiceBuffer.current.filter((p: any) => Math.abs(p.time - t) < intervalMs / 2);
-
             const expression: ExpressionSample | null = exprs.length ? exprs[exprs.length - 1] : lastExpr;
             if (expression) lastExpr = expression;
 
-            const hr = hrs.length ? (lastHr = hrs[hrs.length - 1]) : lastHr;
-
-            if (hrs.length) {
-                console.log('[HR] alignStreams: found HR for t', t, hrs[hrs.length - 1]);
+            // HR: dedupe entries within this window by hr.time, then pick the closest one
+            const hrsWindow = heartRateBuffer.current.filter((p: any) => Math.abs(p.time - t) < intervalMs / 2);
+            if (hrsWindow.length) {
+                // keep last sample per exact hr.timestamp to avoid duplicates
+                const lastByTs = new Map<number, any>();
+                for (const h of hrsWindow) lastByTs.set(h.time, h);
+                const uniqueHrs = Array.from(lastByTs.values());
+                const chosenHr = pickClosestByTime(uniqueHrs, t);
+                if (chosenHr) {
+                    lastHr = chosenHr;
+                    if (debug) console.log('[HR] chosen HR for t', t, chosenHr);
+                }
             }
+            const hr = lastHr;
 
-            const blinkValue = blinks.length ? blinks[blinks.length - 1] : null;
+            // blinks: support numbers or {time,..} objects — take the last in the window
+            const blinksWindow = blinkRateBuffer.current.filter((b: any) => {
+                const bt = typeof b === 'number' ? b : (b && b.time) ? b.time : null;
+                return bt != null && Math.abs(bt - t) < intervalMs / 2;
+            });
+            const blinkValue = blinksWindow.length ? blinksWindow[blinksWindow.length - 1] : null;
             const blinkRate: number | null = blinkValue == null
                 ? lastBlink
                 : (typeof blinkValue === 'number'
@@ -368,34 +389,40 @@ export default function RecordPage() {
                         : null));
             lastBlink = blinkRate ?? null;
 
+            // voice: pick the closest pre-aggregated voice sample (do NOT re-average)
             let voice: VoiceSample | null = null;
-            if (voices.length) {
-                const avgVol = voices.reduce((s: number, v: any) => s + (v.volume ?? 0), 0) / voices.length;
-                const avgPitchArr = voices
-                    .map((v: any) => v.pitch)
-                    .filter((p: number | null) => p != null && p > 0) as number[]; // only positive pitches
-                const avgPitch = avgPitchArr.length
-                    ? avgPitchArr.reduce((s, p) => s + p, 0) / avgPitchArr.length
-                    : null;
-                const lastVoice = voices[voices.length - 1];
+            const voicesWindow = voiceBuffer.current.filter((p: any) => Math.abs(p.time - t) < intervalMs / 2);
+            if (voicesWindow.length) {
+                const chosenVoice = pickClosestByTime(voicesWindow, t);
 
-                const normalizedVol = avgVol;
+                // if the chosenVoice is an aggregate produced by your cleaner, prefer its audioValid flag
+                const aggAudioValid = (chosenVoice && (typeof chosenVoice.audioValid === 'boolean'))
+                    ? chosenVoice.audioValid
+                    : undefined;
 
-                const isValid =
-                    (normalizedVol > 0.02) &&
-                    (avgPitch != null && avgPitch > 50) &&
-                    Array.isArray(lastVoice?.mfcc) &&
-                    lastVoice.mfcc.length > 0;
+                // defensive extraction of rms/volume
+                const measuredVol = typeof chosenVoice.volume === 'number' ? chosenVoice.volume : (chosenVoice?.avgRms ?? 0);
+
+                // sensible default threshold — tune by logging distribution (see diagnostics below)
+                const RMS_THRESHOLD = 0.005; // start low; tune to your device
+
+                const fallbackValid = (measuredVol > RMS_THRESHOLD) &&
+                    (chosenVoice.pitch != null && chosenVoice.pitch > 50) &&
+                    Array.isArray(chosenVoice.mfcc) && chosenVoice.mfcc.length > 0;
+
+                const finalValid = (aggAudioValid !== undefined) ? aggAudioValid : fallbackValid;
 
                 voice = {
                     time: t,
-                    volume: normalizedVol,
-                    pitch: avgPitch,
-                    mfcc: lastVoice?.mfcc ?? null,
-                    spectralCentroid: lastVoice?.spectralCentroid ?? null,
-                    zcr: lastVoice?.zcr ?? null,
-                    valid: isValid
+                    volume: measuredVol,
+                    pitch: chosenVoice.pitch ?? null,
+                    mfcc: Array.isArray(chosenVoice.mfcc) ? chosenVoice.mfcc : [],
+                    spectralCentroid: typeof chosenVoice.spectralCentroid === 'number' ? chosenVoice.spectralCentroid : 0,
+                    zcr: typeof chosenVoice.zcr === 'number' ? chosenVoice.zcr : 0,
+                    valid: Boolean(finalValid)
                 };
+
+                if (debug) console.log('[VOICE] chosen voice', chosenVoice, 'finalValid=', finalValid);
             }
 
             timeline.push({ time: t, expression, hr, voice, blinkRate });
