@@ -40,11 +40,38 @@ export type BackendVoiceMetrics = {
   avg_volume?: number;
 };
 
+export type BackendSpiderMetrics = {
+  stressLevel?: number;
+  moodLevel?: number;
+  socialWithdrawal?: number;
+  irritability?: number;
+  cognitiveFatigue?: number;
+  arousalLevel?: number;
+  // accept alternative keys
+  stress?: number;
+  mood?: number;
+  socialWithdrawalLevel?: number;
+  irritabilityLevel?: number;
+  cognitiveFatigueLevel?: number;
+  arousal?: number;
+}
+
+export type BackendSpiderData = {
+  // canonical scored map (keys may vary: Stress | stress | SocialWithdrawal etc.)
+  scores?: { [key: string]: number };
+  // optional raw line from model or fallback string (for debugging/trace)
+  rawLine?: string;
+  source?: string;
+  modelDiff?: number;
+  confidence?: number;
+};
+
 export type BackendReport = {
   faceMetrics: BackendFaceMetrics;
   hrvMetrics: BackendHrvMetrics;
   voiceMetrics: BackendVoiceMetrics;
   reply?: string;
+  spiderData?: BackendSpiderData;
   // backend-only fields (optional)
   riskSummary?: any;
   flaggedExcerpts?: any;

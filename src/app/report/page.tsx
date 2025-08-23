@@ -2,16 +2,19 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import type { BackendSpiderData } from '@/types';
 import { useReport } from '@/context/ReportContext';
-import { mockBackendReport, BackendReport } from '@/lib/mockReportData';
+import { BackendReport } from '@/lib/mockReportData';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
+import SpiderChart from '@/components/SpiderChart';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { Smile, Heart, Volume2, Lightbulb, TrendingUp, Sparkles, Target, ChevronDown } from 'lucide-react'; // Added Sparkles icon
 import LoadingScreen from '@/components/Loader';
+
 
 function simpleMarkdownToHtml(s: string): string {
     if (!s) return "";
@@ -241,6 +244,8 @@ export default function ReportPage() {
     const [isMounted, setIsMounted] = useState(false);
     const [localReportData, setLocalReportData] = useState<BackendReport | null>(null);
     let reportData = contextReportData ?? localReportData;
+    // ensure hooks order: declare resolvedSpiderData state early so it's always called
+    const [resolvedSpiderData, setResolvedSpiderData] = useState<BackendSpiderData | null | undefined>((reportData as any)?.spiderData ?? null);
 
     useEffect(() => { setIsMounted(true); }, []);
 
@@ -265,6 +270,63 @@ export default function ReportPage() {
         }
     }, [isMounted, reportData, localReportData, router]);
 
+    // Try to derive spider data from the report object itself (no spider API required).
+    const normalizeSpiderCandidate = (cand: any): BackendSpiderData | null => {
+        if (!cand) return null;
+        try {
+            // Already a spider object
+            if (typeof cand === 'object' && (cand.scores || cand.rawLine || cand.confidence || cand.source)) return cand as BackendSpiderData;
+            // wrapper like { spiderData: {...} }
+            if (typeof cand === 'object' && cand.spiderData) return cand.spiderData as BackendSpiderData;
+            // sometimes stored as a JSON string under spiderJson
+            if (typeof cand === 'string') {
+                try {
+                    const parsed = JSON.parse(cand);
+                    if (parsed && (parsed.scores || parsed.rawLine || parsed.confidence)) return parsed as BackendSpiderData;
+                } catch (e) {
+                    // not json - try to parse raw SPIDER_DATA line
+                    const m = cand.match(/SPIDER_DATA[:\s]*([0-9,\s]+)\s*,?\s*CONF[:\s]*([0-9]{1,3})/i);
+                    if (m) {
+                        const nums = m[1].split(',').map(s => Number(s.trim())).filter(n => !Number.isNaN(n));
+                        const conf = Number(m[2]) || 0;
+                        const labelsOrder = ["Stress","LowMood","SocialWithdrawal","Irritability","CognitiveFatigue","Arousal"];
+                        const scores: any = {};
+                        for (let i = 0; i < Math.min(nums.length, labelsOrder.length); i++) scores[labelsOrder[i]] = nums[i];
+                        return { scores, rawLine: cand, confidence: conf } as BackendSpiderData;
+                    }
+                }
+            }
+        } catch (e) {
+            // ignore
+        }
+        return null;
+    };
+
+    useEffect(() => {
+        if (resolvedSpiderData) return;
+        const session = reportData ?? localReportData;
+        if (!session) return;
+        // look through likely fields for embedded spider data
+        const candidates = [
+            (session as any).spiderData,
+            (session as any).spiderJson,
+            (session as any).spider_json,
+            (session as any).spiderJsonString,
+            (session as any).spider, // fallback
+            (session as any).rawSpider,
+            (session as any).reply,
+        ];
+        for (const c of candidates) {
+            const normalized = normalizeSpiderCandidate(c);
+            if (normalized) {
+                setResolvedSpiderData(normalized);
+                return;
+            }
+        }
+    }, [reportData, localReportData, resolvedSpiderData]);
+
+    // Always-declared effect: attempt to fetch spiderData if not present on the report
+
     if (!isMounted || (!reportData && !localReportData)) {
         return (
             <div className="flex min-h-screen flex-col items-center justify-center bg-background p-4">
@@ -282,6 +344,8 @@ export default function ReportPage() {
     const observations = parsed.observations; // {heading?, text}[]
     const recommendation = parsed.actionable; // string[]
     const flaggedExcerpts = parsed.flagged;
+
+
 
     const keyTakeaway = "Your session indicates a primarily neutral emotional state, but with signs of underlying physiological stress. The key is to incorporate mindful relaxation to complement your existing routines.";
 
@@ -408,6 +472,13 @@ export default function ReportPage() {
                                         <p className="text-xs text-muted-foreground">Max Volume: {voiceMetrics?.maxVolume?.toFixed(2) ?? '--'}</p>
                                     </div>
                                 </div>
+                            </div>
+                        </motion.div>
+
+                        <motion.div variants={itemVariants}>
+                            <h3 className="text-base font-semibold text-foreground mt-4 mb-2">Multimodal Tendencies</h3>
+                            <div className="bg-muted/10 p-4 rounded-lg border">
+                                <SpiderChart spiderData={resolvedSpiderData ?? (data as any)?.spiderData} sessionId={(data as any)?.sessionId} />
                             </div>
                         </motion.div>
                     </div>
