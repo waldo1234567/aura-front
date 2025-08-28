@@ -8,8 +8,6 @@ import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
 import { Camera, Headphones, Heart, CheckCircle, Mic, CircleStop, TriangleAlert } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
-import * as faceapi from 'face-api.js';
-import * as Meyda from 'meyda';
 import { computeEAR, detectPitch } from '@/app/utils/utils';
 import TranscriptDiff from '@/components/TranscriptDiff';
 import { VoiceCleaner } from '@/lib/cleaner';
@@ -88,6 +86,8 @@ const popIn = {
 
 export default function RecordPage() {
     // Modal state for prompt questions
+    const faceapiRef = useRef<any>(null);
+    const MeydaRef = useRef<any>(null);
     const [showPromptModal, setShowPromptModal] = useState(false);
     const [currentPromptIdx, setCurrentPromptIdx] = useState(0);
     const psychiatristPrompts = [
@@ -150,17 +150,33 @@ export default function RecordPage() {
 
 
     useEffect(() => {
-        const MODEL_URL = '/models';
-        Promise.all([
-            faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-            faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL),
-            faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        ])
-            .then(() => setModelsLoaded(true))
-            .catch(() => {
-                faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-                faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL).then(() => setModelsLoaded(true));
-            });
+        let mounted = true;
+
+        (async () => {
+            try {
+                // dynamic import only runs in browser at runtime
+                const faceapiModule = await import('face-api.js');
+                const meydaModule = await import('meyda');
+
+                // store module refs for later use
+                faceapiRef.current = faceapiModule;
+                MeydaRef.current = (meydaModule && (meydaModule as any).default) ? (meydaModule as any).default : meydaModule;
+
+                const MODEL_URL = '/models';
+                await Promise.all([
+                    faceapiRef.current.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                    faceapiRef.current.nets.faceExpressionNet.loadFromUri(MODEL_URL),
+                    faceapiRef.current.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+                ]);
+
+                if (mounted) setModelsLoaded(true);
+            } catch (err) {
+                console.error('Failed to load face-api / meyda modules or models:', err);
+                // optionally leave modelsLoaded false — you already have a catch in your original code
+            }
+        })();
+
+        return () => { mounted = false; };
     }, []);
 
     async function fetchPolishedTranscript(raw: string) {
@@ -552,7 +568,9 @@ export default function RecordPage() {
 
         exprIntervalRef.current = window.setInterval(async () => {
             if (!sessionRunningRef.current) return;
-            const det = await faceapi.detectSingleFace(videoRef.current!, new faceapi.TinyFaceDetectorOptions())
+            const faceapi = faceapiRef.current;
+            if (!faceapi) return;
+            const det: any = await faceapi.detectSingleFace(videoRef.current!, new faceapi.TinyFaceDetectorOptions())
                 .withFaceLandmarks()
                 .withFaceExpressions();
             if (!det?.landmarks) return;
@@ -571,10 +589,17 @@ export default function RecordPage() {
 
             let bestEmotion: string | null = null;
             let bestVal = 0;
-            Object.entries(det.expressions).forEach(([emo, val]) => {
-                if (val > bestVal) { bestVal = val; bestEmotion = emo; }
-            });
-
+            const expressions = det.expressions as Record<string, number> | undefined;
+            if (expressions) {
+                for (const [emo, val] of Object.entries(expressions)) {
+                    // defensive: ensure val is numeric
+                    const num = typeof val === "number" ? val : Number(val);
+                    if (Number.isFinite(num) && num > bestVal) {
+                        bestVal = num;
+                        bestEmotion = emo;
+                    }
+                }
+            }
             const p: ExpressionSample = { time: now, emotion: bestEmotion, confidence: bestVal, faceConfidence: det.detection.score, ear: avgEAR, blinkRate };
             if (p.faceConfidence >= 0.5 && !isInReadingWindow(now)) {
                 expressionsBuffer.current.push(p);
@@ -599,7 +624,8 @@ export default function RecordPage() {
         }
         const cleaner = new VoiceCleaner();
         const bufferSize = analyserRef.current?.fftSize ?? 8192;
-
+        const Meyda = MeydaRef.current;
+        if (!Meyda) throw new Error('Meyda not loaded');
         const meydaAnalyzer = (Meyda as any).createMeydaAnalyzer({
             audioContext: audioCtxRef.current!,
             source: audioCtx.createMediaStreamSource(videoRef.current!.srcObject as MediaStream),
