@@ -166,7 +166,7 @@ export default function RecordPage() {
     async function fetchPolishedTranscript(raw: string) {
         console.log('Sending raw transcript length:', raw?.length);
 
-        const res = await fetch('http://localhost:5555/api/v1/asr/polish', {
+        const res = await fetch('https://aura-back-pi03.onrender.com/api/v1/asr/polish', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ raw })
@@ -202,7 +202,7 @@ export default function RecordPage() {
                 typeof chosenTranscript === "string"
                     ? chosenTranscript
                     : chosenTranscript.finalTranscript;
-            const response = await fetch('http://localhost:5555/api/v1/vlogs', {
+            const response = await fetch('https://aura-back-pi03.onrender.com/api/v1/vlogs', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
