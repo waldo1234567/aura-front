@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -13,7 +13,7 @@ import { fetchSessionSummary, fetchVersions } from "@/lib/mockAPI";
 import type { SessionSummary, Version } from "@/types";
 import { useRouter, useSearchParams } from 'next/navigation';
 
-export default function DashboardPage() {
+function DashboardContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
 
@@ -173,5 +173,13 @@ export default function DashboardPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function DashboardPage() {
+    return (
+        <Suspense fallback={<div className="p-6">Loading dashboard...</div>}>
+            <DashboardContent />
+        </Suspense>
     );
 }
