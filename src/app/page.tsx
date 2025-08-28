@@ -30,30 +30,28 @@ export default function Home() {
   return (
     <div className="flex min-h-screen flex-col bg-background">
       <div className="absolute inset-0 pointer-events-none">
-        {/* Large accent - Top Left */}
         <div className="absolute top-[-300px] left-[-300px] w-[800px] h-[800px] rounded-full bg-primary/20 blur-[200px] animate-pulse-slow" />
-        {/* Large accent - Bottom Right */}
+  
         <div className="absolute bottom-[-400px] right-[-400px] w-[900px] h-[900px] rounded-full bg-secondary/20 blur-[150px]" />
-        {/* Medium accent - Top Right */}
+
         <div className="absolute top-1/4 right-1/4 w-[500px] h-[500px] rounded-full bg-secondary/20 blur-[150px]" />
-        {/* Medium accent - Mid Left */}
+   
         <div className="absolute bottom-1/3 left-1/4 w-[400px] h-[400px] rounded-full bg-primary/25 blur-[100px]" />
-        {/* New accent - Mid Right */}
+       
         <div className="absolute top-1/2 right-1/3 w-[600px] h-[600px] rounded-full bg-primary/15 blur-[180px]" />
-        {/* New accent - Bottom Middle */}
+      
         <div className="absolute bottom-1/4 left-1/2 -translate-x-1/2 w-[500px] h-[500px] rounded-full bg-secondary/15 blur-[200px]" />
       </div>
 
       <header className="sticky top-0 z-50 flex h-16 items-center justify-between border-b bg-background/80 backdrop-blur-sm px-4 md:px-8">
-        {/* ... (Header code is the same) ... */}
         <Link href="/" className="flex items-center gap-2 font-bold text-lg">
           <span className="text-primary">Clarity AI</span>
         </Link>
         <nav className="hidden md:flex items-center space-x-6 text-sm font-medium">
-          <Link href="/about" className="text-foreground hover:text-primary transition-colors">
+          <Link href="/" className="text-foreground hover:text-primary transition-colors">
             About
           </Link>
-          <Link href="/contact" className="text-foreground hover:text-primary transition-colors">
+          <Link href="/" className="text-foreground hover:text-primary transition-colors">
             Contact
           </Link>
           <Button asChild>
@@ -73,8 +71,8 @@ export default function Home() {
             </SheetHeader>
             <div className="flex flex-col gap-4 mt-6">
               <Link href="/" className="hover:text-primary">Home</Link>
-              <Link href="/about" className="hover:text-primary">About</Link>
-              <Link href="/contact" className="hover:text-primary">Contact</Link>
+              <Link href="/" className="hover:text-primary">About</Link>
+              <Link href="/" className="hover:text-primary">Contact</Link>
               <Button asChild className="mt-4">
                 <Link href="/record">Start My Check-up</Link>
               </Button>
@@ -82,10 +80,7 @@ export default function Home() {
           </SheetContent>
         </Sheet>
       </header>
-
-      {/* Main Content Area - ensures proper layout and scrolling */}
       <main className="flex-1 overflow-auto z-10">
-        {/* 1. Hero Section with Animation */}
         <section className="container mx-auto flex flex-col items-center justify-center gap-8 py-20 px-4 md:flex-row md:py-32">
           <motion.div
             className="flex flex-col items-center text-center md:items-start md:text-left md:w-1/2"
@@ -112,14 +107,12 @@ export default function Home() {
             animate="animate"
           >
             <img
-              src="/placeholder-image.png" // Replace with your own image
+              src="/person_sunrise.jpg" 
               alt="A person looking peacefully at a sunrise"
               className="rounded-xl shadow-lg"
             />
           </motion.div>
         </section>
-
-        {/* 2. Features Section (now with `whileInView`) */}
         <motion.section
           className="container mx-auto py-20 px-4 relative z-10"
           initial="initial"
@@ -165,7 +158,6 @@ export default function Home() {
           </div>
         </motion.section>
 
-        {/* 3. Final CTA Section (now with `whileInView`) */}
         <section className="container mx-auto py-20 px-4 text-center">
           <motion.div
             initial="initial"
@@ -184,7 +176,6 @@ export default function Home() {
         </section>
       </main>
 
-      {/* Footer */}
       <footer className="border-t bg-background/80 backdrop-blur-sm text-foreground/60 py-4 text-center text-sm z-10">
         <p>&copy; 2025 Clarity AI. All rights reserved.</p>
       </footer>
